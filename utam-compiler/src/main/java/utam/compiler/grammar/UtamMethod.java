@@ -11,22 +11,25 @@ import static utam.compiler.helpers.TypeUtilities.VOID;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import java.util.ArrayList;
-import java.util.List;
+
+import java.util.*;
+
 import utam.compiler.helpers.ElementContext;
 import utam.compiler.helpers.MethodContext;
 import utam.compiler.helpers.PrimitiveType;
 import utam.compiler.helpers.TranslationContext;
 import utam.compiler.helpers.TypeUtilities;
+import utam.compiler.representation.BeforeLoadMethod;
 import utam.compiler.representation.ChainMethod;
 import utam.compiler.representation.ComposeMethod;
 import utam.compiler.representation.ComposeMethodStatement;
 import utam.compiler.representation.InterfaceMethod;
-import utam.compiler.representation.UtilityMethod;
 import utam.core.declarative.representation.MethodParameter;
 import utam.core.declarative.representation.PageObjectMethod;
 import utam.core.declarative.representation.TypeProvider;
 import utam.core.framework.consumer.UtamError;
+
+import static utam.compiler.grammar.UtamPageObject.BEFORELOAD_METHOD_MANE;
 
 /**
  * public method declared at PO level
@@ -43,11 +46,14 @@ class UtamMethod {
       "method '%s': 'return' property is redundant";
   static final String ERR_METHOD_RETURN_ALL_REDUNDANT =
       "method '%s': 'returnAll' property is redundant";
-  private static final String SUPPORTED_METHOD_TYPES = "\"compose\", \"chain\", or \"external\"";
+  private static final String SUPPORTED_METHOD_TYPES = "\"compose\" or \"chain\"";
   static final String ERR_METHOD_UNKNOWN_TYPE =
       "method '%s': one of " + SUPPORTED_METHOD_TYPES + " should be set";
   static final String ERR_METHOD_REDUNDANT_TYPE =
       "method '%s': only one of " + SUPPORTED_METHOD_TYPES + " can be set";
+  static final String ERR_DUPLICATED_STATEMENT = "beforeLoad: duplicate declaration { element: %s, apply: %s } - already exists";
+  static final String ERR_BEFORELOAD_NAME_NOT_ALLOWED =
+          "method name \"load\" is reserved for 'beforeload' property, please use other name";
   final String name;
   private final String comments = "";
   UtamMethodAction[] compose;
@@ -55,14 +61,12 @@ class UtamMethod {
   String returnStr;
   Boolean isReturnList;
   UtamMethodChainLink[] chain;
-  UtamMethodUtil externalUtility;
 
   @JsonCreator
   UtamMethod(
       @JsonProperty(value = "name", required = true) String name,
       @JsonProperty(value = "compose") UtamMethodAction[] compose,
       @JsonProperty(value = "chain") UtamMethodChainLink[] chain,
-      @JsonProperty(value = "external") UtamMethodUtil externalUtility,
       @JsonProperty(value = "args") UtamArgument[] args,
       @JsonProperty(value = "return", defaultValue = "void") String returnStr,
       @JsonProperty(value = "returnAll") Boolean isReturnList) {
@@ -72,31 +76,25 @@ class UtamMethod {
     this.returnStr = returnStr;
     this.isReturnList = isReturnList;
     this.chain = chain;
-    this.externalUtility = externalUtility;
-  }
-
-  // used in tests - shortcut for utils
-  UtamMethod(String name, String returns, UtamMethodUtil externalUtility, Boolean returnAll) {
-    this(name, null, null, externalUtility, null, returns, returnAll);
   }
 
   // used in tests - shortcut for compose
   UtamMethod(String name, UtamMethodAction[] compose) {
-    this(name, compose, null, null, null, null, null);
+    this(name, compose, null, null, null, null);
   }
 
   // used in tests - shortcut for abstract
   UtamMethod(String name, String returns, UtamArgument[] args) {
-    this(name, null, null, null, args, returns, null);
+    this(name, null, null, args, returns, null);
   }
 
   // used in tests - shortcut for chain
   UtamMethod(String name, String returns, UtamMethodChainLink[] chain) {
-    this(name, null, chain, null, null, returns, null);
+    this(name, null, chain, null, returns, null);
   }
 
   PageObjectMethod getAbstractMethod(TranslationContext context) {
-    if (compose != null || chain != null || externalUtility != null) {
+    if (compose != null || chain != null) {
       throw new UtamError(String.format(ERR_METHOD_SHOULD_BE_ABSTRACT, name));
     }
     MethodContext methodContext = new MethodContext(name, getReturnType(context, VOID), isReturnsList());
@@ -107,24 +105,20 @@ class UtamMethod {
   }
 
   PageObjectMethod getMethod(TranslationContext context) {
+    if (!context.isBeforeLoad() && name.equals(BEFORELOAD_METHOD_MANE)) {
+      throw new UtamError(ERR_BEFORELOAD_NAME_NOT_ALLOWED);
+    }
     if (context.isAbstractPageObject()) {
       return getAbstractMethod(context);
     }
     if (compose != null) {
-      if (chain != null || externalUtility != null) {
+      if (chain != null) {
         throw new UtamError(String.format(ERR_METHOD_REDUNDANT_TYPE, name));
       }
       return getComposeMethod(context);
     }
     if (chain != null) {
-      if (compose != null || externalUtility != null) {
-        throw new UtamError(String.format(ERR_METHOD_REDUNDANT_TYPE, name));
-      }
       return getChainMethod(context);
-    }
-    if (externalUtility != null) {
-      // We already know chain and compose are null if we've gotten here
-      return getUtilityMethod(context);
     }
     throw new UtamError(String.format(ERR_METHOD_UNKNOWN_TYPE, name));
   }
@@ -141,15 +135,6 @@ class UtamMethod {
       type = context.getType(returnStr);
     }
     return type;
-  }
-
-  private PageObjectMethod getUtilityMethod(TranslationContext context) {
-    return new UtilityMethod(
-        name,
-        getReturnType(context, VOID),
-        isReturnsList(),
-        externalUtility.getMethodReference(name, context),
-        comments);
   }
 
   PageObjectMethod getChainMethod(TranslationContext context) {
@@ -206,4 +191,37 @@ class UtamMethod {
         comments);
   }
 
+  PageObjectMethod getBeforeLoadMethod(TranslationContext context) {
+    if (args != null) {
+      throw new UtamError(String.format(ERR_ARGS_NOT_ALLOWED, name));
+    }
+    if (compose.length == 0) {
+      throw new UtamError(String.format(ERR_METHOD_EMPTY_STATEMENTS, name));
+    }
+    List<ComposeMethodStatement> statements = new ArrayList<>();
+    List<MethodParameter> methodParameters = new ArrayList<>();
+    Map<String ,String> beforeLoadMethodActions = new HashMap<>();
+
+    MethodContext methodContext = new MethodContext(name, VOID, false);
+    for (UtamMethodAction utamMethodAction : compose) {
+      // Check if a statement is already added, to avoid duplicates
+      if (beforeLoadMethodActions.containsKey(utamMethodAction.elementName) &&
+              beforeLoadMethodActions.get(utamMethodAction.elementName).equals(utamMethodAction.apply)) {
+        throw new UtamError(String.
+                format(ERR_DUPLICATED_STATEMENT, utamMethodAction.elementName, utamMethodAction.apply));
+      } else {
+        beforeLoadMethodActions.put(utamMethodAction.elementName, utamMethodAction.apply);
+      }
+      ComposeMethodStatement statement = utamMethodAction
+              .getComposeAction(context, methodContext, false);
+      statements.add(statement);
+      methodParameters.addAll(statement.getParameters());
+    }
+    methodParameters.removeIf(MethodParameter::isLiteral);
+    return new BeforeLoadMethod(
+            methodContext,
+            statements,
+            methodParameters,
+            comments);
+  }
 }

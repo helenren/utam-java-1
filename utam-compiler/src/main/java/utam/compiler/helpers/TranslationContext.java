@@ -16,7 +16,6 @@ import utam.core.declarative.translator.TranslationTypesConfig;
 import utam.core.declarative.translator.TranslatorConfig;
 import utam.core.framework.consumer.UtamError;
 import utam.core.framework.context.Profile;
-import utam.compiler.representation.UtilityReferenceField;
 
 import java.util.*;
 
@@ -52,6 +51,7 @@ public final class TranslationContext {
   private final Set<String> usedPrivateMethods = new HashSet<>();
   private boolean isAbstractPageObject = false;
   private final Map<String, ElementUnitTestHelper> testableElements = new HashMap<>();
+  private boolean isBeforeLoad;
 
   public TranslationContext(String pageObjectURI, TranslatorConfig translatorConfiguration) {
     this.pageObjectURI = pageObjectURI;
@@ -121,15 +121,6 @@ public final class TranslationContext {
     pageObjectFields.add(field);
   }
 
-  public PageClassField setUtilityField(TypeProvider provider) {
-    PageClassField field = new UtilityReferenceField(provider);
-    // for utilities field might have been already declared
-    if (pageObjectFields.stream().noneMatch(f -> f.getName().equals(field.getName()))) {
-      pageObjectFields.add(field);
-    }
-    return field;
-  }
-
   public void setMethod(PageObjectMethod method) {
     // first check if same method already exists
     if (methodNames.contains(method.getDeclaration().getName())) {
@@ -197,7 +188,6 @@ public final class TranslationContext {
     return testableElements;
   }
 
-
   /**
    * remember element for unit test deserializer
    * @param elementName name of the element
@@ -207,4 +197,20 @@ public final class TranslationContext {
     this.testableElements.put(elementName, helper);
   }
 
+  /**
+   * Returns beforeLoad flag.
+   *
+   * @return boolean isBeforeLoad
+   */
+  public boolean isBeforeLoad() {
+    return isBeforeLoad;
+  }
+
+  /**
+   * Used to set beforeLoad flag.
+   * @param beforeLoad boolean beforeLoad
+   */
+  public void setBeforeLoad(boolean beforeLoad) {
+    isBeforeLoad = beforeLoad;
+  }
 }
